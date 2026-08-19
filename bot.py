@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -20,7 +21,6 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type in ['group', 'supergroup']:
         try:
             administrators = await context.bot.get_chat_administrators(chat.id)
-            members = await context.bot.get_chat_member_count(chat.id)
 
             mentions = []
             for admin in administrators:
@@ -48,7 +48,12 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Эта команда работает только в группах!")
 
 def main():
-    TOKEN = "8765447900:AAHevJfVox0c4qUwTtknb-qg9su47C8zd00"
+    # Получаем новый токен из переменных окружения Render
+    TOKEN = os.getenv("BOT_TOKEN")
+
+    if not TOKEN:
+        logger.error("Переменная BOT_TOKEN не задана!")
+        return
 
     application = Application.builder().token(TOKEN).build()
 
