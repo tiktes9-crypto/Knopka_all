@@ -3,6 +3,7 @@ import os
 import json
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -107,6 +108,10 @@ async def setup_commands(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
+async def health_check(request):
+    """Health check endpoint для Render"""
+    return web.Response(text="OK")
+
 def main():
     TOKEN = os.getenv("BOT_TOKEN", "8765447900:AAHevJfVox0c4qUwTtknb-qg9su47C8zd00")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Например: https://your-app.onrender.com
@@ -134,11 +139,17 @@ def main():
     # Иначе используем polling (для локального запуска)
     if WEBHOOK_URL:
         logger.info(f"Запуск в режиме webhook: {WEBHOOK_URL}")
+
+        # Добавляем health check route
+        async def health(request):
+            return web.Response(text="OK")
+
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+            secret_token="my_secret_token"
         )
     else:
         logger.info("Запуск в режиме polling (локально)")
