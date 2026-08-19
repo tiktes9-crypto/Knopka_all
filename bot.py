@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(
@@ -98,6 +98,15 @@ async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Список участников уже пуст.")
 
+async def setup_commands(application: Application):
+    """Устанавливаем меню команд для бота"""
+    commands = [
+        BotCommand("start", "Информация о боте"),
+        BotCommand("all", "Упомянуть всех участников группы"),
+        BotCommand("clear", "Очистить список участников"),
+    ]
+    await application.bot.set_my_commands(commands)
+
 def main():
     TOKEN = os.getenv("BOT_TOKEN", "8765447900:AAHevJfVox0c4qUwTtknb-qg9su47C8zd00")
 
@@ -113,6 +122,9 @@ def main():
     application.add_handler(CommandHandler("all", mention_all))
     application.add_handler(CommandHandler("clear", clear_members))
     application.add_handler(MessageHandler(filters.ALL, track_members))
+
+    # Устанавливаем меню команд
+    application.post_init = setup_commands
 
     logger.info("Бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
