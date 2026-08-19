@@ -109,6 +109,8 @@ async def setup_commands(application: Application):
 
 def main():
     TOKEN = os.getenv("BOT_TOKEN", "8765447900:AAHevJfVox0c4qUwTtknb-qg9su47C8zd00")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Например: https://your-app.onrender.com
+    PORT = int(os.getenv("PORT", "10000"))
 
     if not TOKEN:
         logger.error("Переменная BOT_TOKEN не задана!")
@@ -127,7 +129,20 @@ def main():
     application.post_init = setup_commands
 
     logger.info("Бот запущен...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Если есть WEBHOOK_URL - используем webhook (для Render)
+    # Иначе используем polling (для локального запуска)
+    if WEBHOOK_URL:
+        logger.info(f"Запуск в режиме webhook: {WEBHOOK_URL}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+        )
+    else:
+        logger.info("Запуск в режиме polling (локально)")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
