@@ -19,7 +19,6 @@ db_pool = None
 async def init_db(database_url: str):
     """Инициализация подключения к PostgreSQL и создание таблицы"""
     global db_pool
-    # Render выдает URL вида postgres://, asyncpg требует postgresql://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
 
@@ -38,24 +37,26 @@ async def init_db(database_url: str):
     logger.info("Успешное подключение к PostgreSQL и проверка таблиц.")
 
 async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отслеживаем и сохраняем участников в БД"""
+    """Отслеживаем активных участников и обновляем их имена/юзернеймы в БД"""
     if update.message and update.effective_user and update.effective_chat:
         chat_id = str(update.effective_chat.id)
         user = update.effective_user
 
         if not user.is_bot and db_pool:
+            clean_username = user.username.replace('@', '') if user.username else None
+            
             async with db_pool.acquire() as conn:
                 await conn.execute('''
                     INSERT INTO chat_members (chat_id, user_id, username, first_name)
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (chat_id, user_id) 
                     DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
-                ''', chat_id, user.id, user.username, user.first_name)
+                ''', chat_id, user.id, clean_username, user.first_name)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Используй команду /all чтобы упомянуть всех участников группы.\n\n'
-        'Бот запоминает участников по их сообщениям в чате и хранит их в базе данных.'
+        'Бот запоминает участников по их сообщениям в чате.'
     )
 
 async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,7 +79,7 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if row['username']:
                         mentions.append(f"@{row['username']}")
                     else:
-                        first_name = row['first_name'] or 'User'
+                        first_name = row['first_name'] or 'Пользователь'
                         mentions.append(f"[{first_name}](tg://user?id={row['user_id']})")
 
                 message = "📢 Призываю всех:\n\n" + " ".join(mentions)
@@ -88,19 +89,19 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(message, parse_mode='Markdown')
             else:
                 await update.message.reply_text(
-                    "Еще не собрал участников. Бот запоминает пользователей по их сообщениям в чате."
+                    "Еще не собрал участников. Пусть каждый участник напишет хотя бы одно сообщение в чат!"
                 )
     else:
         await update.message.reply_text("Эта команда работает только в группах!")
 
 async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Очистить список участников для текущего чата"""
-    chat_id = str(chat.id) if (chat := update.effective_chat) else None
-
-    if chat_id and db_pool:
+    chat = update.effective_chat
+    if chat and db_pool:
+        chat_id = str(chat.id)
         async with db_pool.acquire() as conn:
             await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
-        await update.message.reply_text("Список участников для этого чата очищен.")
+        await update.message.reply_text("Список участников для этого чата полностью очищен. Отправьте сообщения, чтобы записаться заново.")
 
 async def setup_commands(application: Application):
     """Установка меню команд"""
@@ -119,18 +120,12 @@ async def main():
     DATABASE_URL = os.getenv("DATABASE_URL")
     PORT = int(os.getenv("PORT", "10000"))
 
-    if not TOKEN:
-        logger.error("Переменная BOT_TOKEN не задана!")
+    if not TOKEN or not DATABASE_URL:
+        logger.error("Проверьте переменные BOT_TOKEN и DATABASE_URL!")
         return
 
-    if not DATABASE_URL:
-        logger.error("Переменная DATABASE_URL не задана!")
-        return
-
-    # Подключаемся к базе данных
     await init_db(DATABASE_URL)
 
-    # Инициализация Telegram Application
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("all", mention_all))
@@ -139,7 +134,6 @@ async def main():
     
     await setup_commands(application)
 
-    # Веб-сервер для Render / cron-job.org
     app = web.Application()
     app.router.add_get('/', health_check)
 
@@ -147,14 +141,12 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logger.info(f"Веб-сервер запущен на порту {PORT}...")
 
-    # Старт бота в режиме polling с очисткой вебхуков
     await application.initialize()
     await application.bot.delete_webhook(drop_pending_updates=True)
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Бот запущен с подключенной базой PostgreSQL!")
+    logger.info("Бот успешно запущен!")
 
     await asyncio.Event().wait()
 
