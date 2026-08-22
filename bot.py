@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import random
 import asyncpg
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -56,7 +57,7 @@ async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Используй команду /all чтобы упомянуть всех участников группы.\n\n'
-        'Бот запоминает участников по их сообщениям в чате.'
+        'Бот запоминает участников по их сообщениям в чате или при добавлении через /add.'
     )
 
 async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,7 +90,7 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(message, parse_mode='Markdown')
             else:
                 await update.message.reply_text(
-                    "Еще не собрал участников. Пусть каждый участник напишет хотя бы одно сообщение в чат!"
+                    "Еще не собрал участников. Добавь их через /add @username или пусть они напишут сообщение в чат!"
                 )
     else:
         await update.message.reply_text("Эта команда работает только в группах!")
@@ -101,24 +102,25 @@ async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(chat.id)
         async with db_pool.acquire() as conn:
             await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
-        await update.message.reply_text("Список участников для этого чата полностью очищен. Отправьте сообщения, чтобы записаться заново.")
+        await update.message.reply_text("Список участников для этого чата полностью очищен.")
 
 async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручное добавление участника: /add @username ID Имя"""
+    """Ручное добавление участника чисто по @username"""
     chat_id = str(update.effective_chat.id)
     
-    if len(context.args) < 3:
-        await update.message.reply_text("Формат: /add @username user_id Имя\nПример: /add @durov 123456789 Павел")
+    if not context.args:
+        await update.message.reply_text("Формат: /add @username\nПример: /add @coolcolder1337")
         return
 
-    username = context.args[0].replace('@', '')
-    try:
-        user_id = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Ошибка: user_id должен быть числом!")
+    # Берём юзернейм и чистим от @
+    username = context.args[0].replace('@', '').strip()
+
+    if not username:
+        await update.message.reply_text("Укажите корректный юзернейм!")
         return
 
-    first_name = " ".join(context.args[2:])
+    # Генерируем временный уникальный ID
+    fake_user_id = random.randint(100000000, 999999999)
 
     if db_pool:
         async with db_pool.acquire() as conn:
@@ -126,17 +128,17 @@ async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 INSERT INTO chat_members (chat_id, user_id, username, first_name)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (chat_id, user_id) 
-                DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
-            ''', chat_id, user_id, username, first_name)
+                DO UPDATE SET username = EXCLUDED.username;
+            ''', chat_id, fake_user_id, username, username)
             
-        await update.message.reply_text(f"Участник @{username} (ID: {user_id}) добавлен в базу!")
+        await update.message.reply_text(f"Участник @{username} успешно добавлен в базу!")
 
 async def setup_commands(application: Application):
     """Установка меню команд"""
     commands = [
         BotCommand("start", "Информация о боте"),
         BotCommand("all", "Упомянуть всех участников группы"),
-        BotCommand("add", "Добавить участника вручную"),
+        BotCommand("add", "Добавить участника по @username"),
         BotCommand("clear", "Очистить список участников"),
     ]
     await application.bot.set_my_commands(commands)
