@@ -140,24 +140,42 @@ def main():
     if WEBHOOK_URL:
         logger.info(f"Запуск в режиме webhook: {WEBHOOK_URL}")
 
-        # Страница для проверок от cron-job.org / Render
+        # Создаем веб-сервер aiohttp вручную
+        app = web.Application()
+
+        # Маршрут для Telegram Webhook
+        async def telegram_webhook(request):
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(text="OK")
+
+        # Маршрут для проверки cron-job.org (Health Check)
         async def health_check(request):
             return web.Response(text="OK", status=200)
 
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            secret_token="my_secret_token",
-            custom_routes=[
-                web.get("/", health_check),
-                web.head("/", health_check)
-            ]
-        )
+        app.router.add_post(f"/{TOKEN}", telegram_webhook)
+        app.router.add_get("/", health_check)
+        app.router.add_head("/", health_check)
+
+        # Устанавливаем вебхук в Telegram
+        async def on_startup(app):
+            await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}", secret_token="my_secret_token")
+            await application.initialize()
+            await application.start()
+
+        async def on_shutdown(app):
+            await application.stop()
+            await application.shutdown()
+
+        app.on_startup.append(on_startup)
+        app.on_shutdown.append(on_shutdown)
+
+        web.run_app(app, host="0.0.0.0", port=PORT)
     else:
         logger.info("Запуск в режиме polling (локально)")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == '__main__':
     main()
