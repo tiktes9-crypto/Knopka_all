@@ -132,10 +132,9 @@ async def main():
     
     await setup_commands(application)
 
-    # Настройка aiohttp веб-сервера для ответа 200 OK на главный URL
+    # Настройка aiohttp веб-сервера (GET автоматически обрабатывает и HEAD)
     app = web.Application()
     app.router.add_get('/', health_check)
-    app.router.add_head('/', health_check)
 
     runner = web.AppRunner(app)
     await runner.setup()
