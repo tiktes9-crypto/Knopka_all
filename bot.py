@@ -1,7 +1,7 @@
 import logging
 import os
-import json
 import asyncio
+import asyncpg
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -13,49 +13,49 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Словарь для хранения участников {chat_id: {user_id: user_data}}
-chat_members = {}
+# Глобальный пул соединений с БД
+db_pool = None
 
-def save_members():
-    """Сохраняем участников в файл"""
-    try:
-        with open('members.json', 'w', encoding='utf-8') as f:
-            json.dump(chat_members, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения участников: {e}")
+async def init_db(database_url: str):
+    """Инициализация подключения к PostgreSQL и создание таблицы"""
+    global db_pool
+    # Render выдает URL вида postgres://, asyncpg требует postgresql://
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-def load_members():
-    """Загружаем участников из файла"""
-    global chat_members
-    try:
-        if os.path.exists('members.json'):
-            with open('members.json', 'r', encoding='utf-8') as f:
-                chat_members = json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка загрузки участников: {e}")
+    db_pool = await asyncpg.create_pool(database_url)
+    
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS chat_members (
+                chat_id TEXT NOT NULL,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                PRIMARY KEY (chat_id, user_id)
+            );
+        ''')
+    logger.info("Успешное подключение к PostgreSQL и проверка таблиц.")
 
 async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отслеживаем активных участников"""
+    """Отслеживаем и сохраняем участников в БД"""
     if update.message and update.effective_user and update.effective_chat:
         chat_id = str(update.effective_chat.id)
         user = update.effective_user
 
-        if not user.is_bot:
-            if chat_id not in chat_members:
-                chat_members[chat_id] = {}
-
-            chat_members[chat_id][str(user.id)] = {
-                'id': user.id,
-                'username': user.username,
-                'first_name': user.first_name,
-                'last_name': user.last_name
-            }
-            save_members()
+        if not user.is_bot and db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO chat_members (chat_id, user_id, username, first_name)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (chat_id, user_id) 
+                    DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
+                ''', chat_id, user.id, user.username, user.first_name)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Используй команду /all чтобы упомянуть всех участников группы.\n\n'
-        'Бот запоминает участников по их сообщениям в чате.'
+        'Бот запоминает участников по их сообщениям в чате и хранит их в базе данных.'
     )
 
 async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,44 +64,46 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type in ['group', 'supergroup']:
         chat_id = str(chat.id)
 
-        if chat_id in chat_members and chat_members[chat_id]:
-            mentions = []
-            for user_data in chat_members[chat_id].values():
-                if user_data.get('username'):
-                    mentions.append(f"@{user_data['username']}")
-                else:
-                    first_name = user_data.get('first_name', 'User')
-                    mentions.append(f"[{first_name}](tg://user?id={user_data['id']})")
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch('''
+                    SELECT user_id, username, first_name 
+                    FROM chat_members 
+                    WHERE chat_id = $1;
+                ''', chat_id)
 
-            if mentions:
+            if rows:
+                mentions = []
+                for row in rows:
+                    if row['username']:
+                        mentions.append(f"@{row['username']}")
+                    else:
+                        first_name = row['first_name'] or 'User'
+                        mentions.append(f"[{first_name}](tg://user?id={row['user_id']})")
+
                 message = "📢 Призываю всех:\n\n" + " ".join(mentions)
-
                 if context.args:
                     message += f"\n\n💬 {' '.join(context.args)}"
 
                 await update.message.reply_text(message, parse_mode='Markdown')
             else:
-                await update.message.reply_text("Список участников пуст.")
-        else:
-            await update.message.reply_text(
-                "Еще не собрал участников. Бот запоминает пользователей по их сообщениям в чате."
-            )
+                await update.message.reply_text(
+                    "Еще не собрал участников. Бот запоминает пользователей по их сообщениям в чате."
+                )
     else:
         await update.message.reply_text("Эта команда работает только в группах!")
 
 async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Очистить список участников для этого чата"""
-    chat_id = str(update.effective_chat.id)
+    """Очистить список участников для текущего чата"""
+    chat_id = str(chat.id) if (chat := update.effective_chat) else None
 
-    if chat_id in chat_members:
-        del chat_members[chat_id]
-        save_members()
-        await update.message.reply_text("Список участников очищен.")
-    else:
-        await update.message.reply_text("Список участников уже пуст.")
+    if chat_id and db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
+        await update.message.reply_text("Список участников для этого чата очищен.")
 
 async def setup_commands(application: Application):
-    """Устанавливаем меню команд для бота"""
+    """Установка меню команд"""
     commands = [
         BotCommand("start", "Информация о боте"),
         BotCommand("all", "Упомянуть всех участников группы"),
@@ -109,19 +111,24 @@ async def setup_commands(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
-# Обработчик для пингов от cron-job.org / Render
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def main():
     TOKEN = os.getenv("BOT_TOKEN")
+    DATABASE_URL = os.getenv("DATABASE_URL")
     PORT = int(os.getenv("PORT", "10000"))
 
     if not TOKEN:
         logger.error("Переменная BOT_TOKEN не задана!")
         return
 
-    load_members()
+    if not DATABASE_URL:
+        logger.error("Переменная DATABASE_URL не задана!")
+        return
+
+    # Подключаемся к базе данных
+    await init_db(DATABASE_URL)
 
     # Инициализация Telegram Application
     application = Application.builder().token(TOKEN).build()
@@ -132,7 +139,7 @@ async def main():
     
     await setup_commands(application)
 
-    # Настройка aiohttp веб-сервера
+    # Веб-сервер для Render / cron-job.org
     app = web.Application()
     app.router.add_get('/', health_check)
 
@@ -142,14 +149,13 @@ async def main():
     await site.start()
     logger.info(f"Веб-сервер запущен на порту {PORT}...")
 
-    # Инициализируем бота и СБРАСЫВАЕМ старый Webhook
+    # Старт бота в режиме polling с очисткой вебхуков
     await application.initialize()
     await application.bot.delete_webhook(drop_pending_updates=True)
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Старый Webhook удален. Бот запущен в режиме polling...")
+    logger.info("Бот запущен с подключенной базой PostgreSQL!")
 
-    # Держим процесс активным
     await asyncio.Event().wait()
 
 if __name__ == '__main__':
