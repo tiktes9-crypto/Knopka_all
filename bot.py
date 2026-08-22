@@ -14,11 +14,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Глобальный пул соединений с БД
 db_pool = None
 
 async def init_db(database_url: str):
-    """Инициализация подключения к PostgreSQL и создание таблицы"""
+    """Инициализация подключения к PostgreSQL и пересоздание правильной структуры"""
     global db_pool
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
@@ -26,41 +25,41 @@ async def init_db(database_url: str):
     db_pool = await asyncpg.create_pool(database_url)
     
     async with db_pool.acquire() as conn:
+        # Создаем таблицу, где завязано на username
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS chat_members (
+            CREATE TABLE IF NOT EXISTS chat_members_v2 (
                 chat_id TEXT NOT NULL,
-                user_id BIGINT NOT NULL,
-                username TEXT,
+                username TEXT NOT NULL,
                 first_name TEXT,
-                PRIMARY KEY (chat_id, user_id)
+                PRIMARY KEY (chat_id, username)
             );
         ''')
-    logger.info("Успешное подключение к PostgreSQL и проверка таблиц.")
+    logger.info("Успешное подключение к PostgreSQL.")
 
 async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отслеживаем активных участников и обновляем их имена/юзернеймы в БД"""
+    """Отслеживаем сообщения участников и сохраняем их юзернеймы"""
     if update.message and update.effective_user and update.effective_chat:
         chat_id = str(update.effective_chat.id)
         user = update.effective_user
 
-        if not user.is_bot and db_pool:
-            clean_username = user.username.replace('@', '') if user.username else None
+        if not user.is_bot and user.username and db_pool:
+            clean_username = user.username.replace('@', '').strip()
             
             try:
                 async with db_pool.acquire() as conn:
                     await conn.execute('''
-                        INSERT INTO chat_members (chat_id, user_id, username, first_name)
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT (chat_id, user_id) 
-                        DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
-                    ''', chat_id, user.id, clean_username, user.first_name)
+                        INSERT INTO chat_members_v2 (chat_id, username, first_name)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (chat_id, username) 
+                        DO UPDATE SET first_name = EXCLUDED.first_name;
+                    ''', chat_id, clean_username, user.first_name)
             except Exception as e:
-                logger.error(f"Ошибка сохранения пользователя: {e}")
+                logger.error(f"Ошибка автоматического сохранения: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Используй команду /all чтобы упомянуть всех участников группы.\n\n'
-        'Бот запоминает участников по их сообщениям в чате или при добавлении через /add.'
+        'Добавляй участников через /add @username.'
     )
 
 async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,28 +72,23 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 async with db_pool.acquire() as conn:
                     rows = await conn.fetch('''
-                        SELECT user_id, username, first_name 
-                        FROM chat_members 
+                        SELECT username 
+                        FROM chat_members_v2 
                         WHERE chat_id = $1;
                     ''', chat_id)
 
                 if rows:
-                    mentions = []
-                    for row in rows:
-                        if row['username']:
-                            mentions.append(f"@{row['username']}")
-                        else:
-                            first_name = row['first_name'] or 'Пользователь'
-                            mentions.append(f"[{first_name}](tg://user?id={row['user_id']})")
-
+                    mentions = [f"@{row['username']}" for row in rows]
+                    
                     message = "📢 Призываю всех:\n\n" + " ".join(mentions)
                     if context.args:
                         message += f"\n\n💬 {' '.join(context.args)}"
 
-                    await update.message.reply_text(message, parse_mode='Markdown')
+                    # Отправляем БЕЗ parse_mode, чтобы Telegram не портил знаки подчеркивания (_)
+                    await update.message.reply_text(message)
                 else:
                     await update.message.reply_text(
-                        "Список участников пуст. Добавь их через /add @username или пусть они напишут сообщение в чат!"
+                        "Список участников пуст. Добавь их через /add @username!"
                     )
             except Exception as e:
                 logger.error(f"Ошибка в mention_all: {e}")
@@ -109,19 +103,18 @@ async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(chat.id)
         try:
             async with db_pool.acquire() as conn:
-                result = await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
-            logger.info(f"Очистка БД для chat_id={chat_id}: {result}")
+                await conn.execute('DELETE FROM chat_members_v2 WHERE chat_id = $1;', chat_id)
             await update.message.reply_text("База участников для этого чата полностью очищена!")
         except Exception as e:
             logger.error(f"Ошибка при очистке БД: {e}")
-            await update.message.reply_text("Не удалось очистить базу данных. Проверьте логи.")
+            await update.message.reply_text("Не удалось очистить базу данных.")
 
 async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручное добавление участника чисто по @username"""
+    """Ручное добавление/обновление участника по @username"""
     chat_id = str(update.effective_chat.id)
     
     if not context.args:
-        await update.message.reply_text("Формат: /add @username\nПример: /add @coolcolder1337")
+        await update.message.reply_text("Формат: /add @username\nПример: /add @kor_drums")
         return
 
     username = context.args[0].replace('@', '').strip()
@@ -130,17 +123,14 @@ async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Укажите корректный юзернейм!")
         return
 
-    fake_user_id = random.randint(100000000, 999999999)
-
     if db_pool:
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute('''
-                    INSERT INTO chat_members (chat_id, user_id, username, first_name)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (chat_id, user_id) 
-                    DO UPDATE SET username = EXCLUDED.username;
-                ''', chat_id, fake_user_id, username, username)
+                    INSERT INTO chat_members_v2 (chat_id, username, first_name)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (chat_id, username) DO NOTHING;
+                ''', chat_id, username, username)
                 
             await update.message.reply_text(f"Участник @{username} успешно добавлен!")
         except Exception as e:
