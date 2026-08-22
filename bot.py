@@ -46,13 +46,16 @@ async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user.is_bot and db_pool:
             clean_username = user.username.replace('@', '') if user.username else None
             
-            async with db_pool.acquire() as conn:
-                await conn.execute('''
-                    INSERT INTO chat_members (chat_id, user_id, username, first_name)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (chat_id, user_id) 
-                    DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
-                ''', chat_id, user.id, clean_username, user.first_name)
+            try:
+                async with db_pool.acquire() as conn:
+                    await conn.execute('''
+                        INSERT INTO chat_members (chat_id, user_id, username, first_name)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (chat_id, user_id) 
+                        DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name;
+                    ''', chat_id, user.id, clean_username, user.first_name)
+            except Exception as e:
+                logger.error(f"Ошибка сохранения пользователя: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -67,31 +70,35 @@ async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(chat.id)
 
         if db_pool:
-            async with db_pool.acquire() as conn:
-                rows = await conn.fetch('''
-                    SELECT user_id, username, first_name 
-                    FROM chat_members 
-                    WHERE chat_id = $1;
-                ''', chat_id)
+            try:
+                async with db_pool.acquire() as conn:
+                    rows = await conn.fetch('''
+                        SELECT user_id, username, first_name 
+                        FROM chat_members 
+                        WHERE chat_id = $1;
+                    ''', chat_id)
 
-            if rows:
-                mentions = []
-                for row in rows:
-                    if row['username']:
-                        mentions.append(f"@{row['username']}")
-                    else:
-                        first_name = row['first_name'] or 'Пользователь'
-                        mentions.append(f"[{first_name}](tg://user?id={row['user_id']})")
+                if rows:
+                    mentions = []
+                    for row in rows:
+                        if row['username']:
+                            mentions.append(f"@{row['username']}")
+                        else:
+                            first_name = row['first_name'] or 'Пользователь'
+                            mentions.append(f"[{first_name}](tg://user?id={row['user_id']})")
 
-                message = "📢 Призываю всех:\n\n" + " ".join(mentions)
-                if context.args:
-                    message += f"\n\n💬 {' '.join(context.args)}"
+                    message = "📢 Призываю всех:\n\n" + " ".join(mentions)
+                    if context.args:
+                        message += f"\n\n💬 {' '.join(context.args)}"
 
-                await update.message.reply_text(message, parse_mode='Markdown')
-            else:
-                await update.message.reply_text(
-                    "Еще не собрал участников. Добавь их через /add @username или пусть они напишут сообщение в чат!"
-                )
+                    await update.message.reply_text(message, parse_mode='Markdown')
+                else:
+                    await update.message.reply_text(
+                        "Список участников пуст. Добавь их через /add @username или пусть они напишут сообщение в чат!"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка в mention_all: {e}")
+                await update.message.reply_text("Произошла ошибка при получении списка участников.")
     else:
         await update.message.reply_text("Эта команда работает только в группах!")
 
@@ -100,9 +107,14 @@ async def clear_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat and db_pool:
         chat_id = str(chat.id)
-        async with db_pool.acquire() as conn:
-            await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
-        await update.message.reply_text("Список участников для этого чата полностью очищен.")
+        try:
+            async with db_pool.acquire() as conn:
+                result = await conn.execute('DELETE FROM chat_members WHERE chat_id = $1;', chat_id)
+            logger.info(f"Очистка БД для chat_id={chat_id}: {result}")
+            await update.message.reply_text("База участников для этого чата полностью очищена!")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке БД: {e}")
+            await update.message.reply_text("Не удалось очистить базу данных. Проверьте логи.")
 
 async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручное добавление участника чисто по @username"""
@@ -112,26 +124,28 @@ async def manual_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Формат: /add @username\nПример: /add @coolcolder1337")
         return
 
-    # Берём юзернейм и чистим от @
     username = context.args[0].replace('@', '').strip()
 
     if not username:
         await update.message.reply_text("Укажите корректный юзернейм!")
         return
 
-    # Генерируем временный уникальный ID
     fake_user_id = random.randint(100000000, 999999999)
 
     if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO chat_members (chat_id, user_id, username, first_name)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (chat_id, user_id) 
-                DO UPDATE SET username = EXCLUDED.username;
-            ''', chat_id, fake_user_id, username, username)
-            
-        await update.message.reply_text(f"Участник @{username} успешно добавлен в базу!")
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO chat_members (chat_id, user_id, username, first_name)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (chat_id, user_id) 
+                    DO UPDATE SET username = EXCLUDED.username;
+                ''', chat_id, fake_user_id, username, username)
+                
+            await update.message.reply_text(f"Участник @{username} успешно добавлен!")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении пользователя: {e}")
+            await update.message.reply_text("Ошибка при сохранении в базу данных.")
 
 async def setup_commands(application: Application):
     """Установка меню команд"""
