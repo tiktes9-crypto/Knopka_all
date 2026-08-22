@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import asyncio
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from aiohttp import web
@@ -10,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-logger = logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # Словарь для хранения участников {chat_id: {user_id: user_data}}
 chat_members = {}
@@ -108,13 +109,12 @@ async def setup_commands(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
-# Эндпоинт пинга для cron-job.org
+# Обработчик для пингов от cron-job.org / Render
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
-def main():
+async def main():
     TOKEN = os.getenv("BOT_TOKEN")
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     PORT = int(os.getenv("PORT", "10000"))
 
     if not TOKEN:
@@ -123,37 +123,34 @@ def main():
 
     load_members()
 
+    # Инициализация Telegram Application
     application = Application.builder().token(TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("all", mention_all))
     application.add_handler(CommandHandler("clear", clear_members))
     application.add_handler(MessageHandler(filters.ALL, track_members))
+    
+    await setup_commands(application)
 
-    application.post_init = setup_commands
+    # Настройка aiohttp веб-сервера для ответа 200 OK на главный URL
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_head('/', health_check)
 
-    logger.info("Бот запущен...")
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Веб-сервер запущен на порту {PORT}...")
 
-    if WEBHOOK_URL:
-        logger.info(f"Запуск в режиме webhook: {WEBHOOK_URL}")
+    # Запуск Telegram бота
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Бот запущен в режиме polling...")
 
-        # Корректная регистрация собственного GET/HEAD маршрута для пинга
-        routes = [
-            web.get('/', health_check),
-            web.head('/', health_check)
-        ]
-
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            secret_token="my_secret_token",
-            routes=routes  # Используем верный параметр 'routes'
-        )
-    else:
-        logger.info("Запуск в режиме polling (локально)")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Держим процесс активным
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
