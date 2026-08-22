@@ -140,16 +140,20 @@ def main():
     if WEBHOOK_URL:
         logger.info(f"Запуск в режиме webhook: {WEBHOOK_URL}")
 
-        # Добавляем health check route
-        async def health(request):
-            return web.Response(text="OK")
+        # Страница для проверок от cron-job.org / Render
+        async def health_check(request):
+            return web.Response(text="OK", status=200)
 
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            secret_token="my_secret_token"
+            secret_token="my_secret_token",
+            custom_routes=[
+                web.get("/", health_check),
+                web.head("/", health_check)
+            ]
         )
     else:
         logger.info("Запуск в режиме polling (локально)")
