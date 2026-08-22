@@ -132,7 +132,7 @@ async def main():
     
     await setup_commands(application)
 
-    # Настройка aiohttp веб-сервера (GET автоматически обрабатывает и HEAD)
+    # Настройка aiohttp веб-сервера
     app = web.Application()
     app.router.add_get('/', health_check)
 
@@ -142,11 +142,12 @@ async def main():
     await site.start()
     logger.info(f"Веб-сервер запущен на порту {PORT}...")
 
-    # Запуск Telegram бота
+    # Инициализируем бота и СБРАСЫВАЕМ старый Webhook
     await application.initialize()
+    await application.bot.delete_webhook(drop_pending_updates=True)
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Бот запущен в режиме polling...")
+    logger.info("Старый Webhook удален. Бот запущен в режиме polling...")
 
     # Держим процесс активным
     await asyncio.Event().wait()
